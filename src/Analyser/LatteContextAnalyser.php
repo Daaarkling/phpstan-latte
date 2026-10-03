@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Efabrica\PHPStanLatte\Analyser;
 
-use Composer\InstalledVersions;
+use Efabrica\PHPStanLatte\Cache\ComposerPackagesCacheKey;
 use Efabrica\PHPStanLatte\LatteContext\Collector\AbstractLatteContextCollector;
 use Efabrica\PHPStanLatte\Temp\TempDirResolver;
 use Exception;
@@ -25,7 +25,6 @@ use PHPStan\Rules\RuleErrorBuilder;
 use RuntimeException;
 use Throwable;
 use function basename;
-use function class_exists;
 use function count;
 use function file_exists;
 use function get_class;
@@ -34,7 +33,6 @@ use function is_array;
 use function is_dir;
 use function is_file;
 use function is_string;
-use function json_encode;
 use function md5;
 use function microtime;
 use function sha1;
@@ -93,9 +91,7 @@ final class LatteContextAnalyser
         $this->typeStringResolver = $typeStringResolver;
         $this->collectorRegistry = new LatteContextCollectorRegistry($collectors);
         $this->tmpDir = $tempDirResolver->resolveCollectorDir();
-        $this->installedVersionsCacheKey = class_exists(InstalledVersions::class)
-            ? (string)json_encode(InstalledVersions::getAllRawData())
-            : '';
+        $this->installedVersionsCacheKey = ComposerPackagesCacheKey::get();
         $profileSetting = getenv('PHPSTAN_LATTE_PROFILE');
         $this->profiler = $profileSetting !== false && $profileSetting !== '' && $profileSetting !== '0'
             ? new LatteContextProfiler()

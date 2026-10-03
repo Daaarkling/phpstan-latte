@@ -18,6 +18,7 @@ use function rtrim;
 use function sprintf;
 use function sys_get_temp_dir;
 use function time;
+use function touch;
 use const DIRECTORY_SEPARATOR;
 
 final class TempDirResolver
@@ -44,6 +45,9 @@ final class TempDirResolver
         $tmpDir = realpath($tmpDir) ?: $tmpDir;
         if (!is_writable($tmpDir)) {
             throw new RuntimeException(sprintf('Temp dir "%s" is not writable', $tmpDir));
+        }
+        if (!touch($tmpDir)) {
+            throw new RuntimeException(sprintf('Unable to update temp dir "%s" access time', $tmpDir));
         }
         $this->tmpDir = $tmpDir;
     }

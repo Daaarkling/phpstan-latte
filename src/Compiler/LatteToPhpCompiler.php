@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Efabrica\PHPStanLatte\Compiler;
 
-use Composer\InstalledVersions;
+use Efabrica\PHPStanLatte\Cache\ComposerPackagesCacheKey;
 use Efabrica\PHPStanLatte\Compiler\Compiler\CompilerInterface;
 use Efabrica\PHPStanLatte\Exception\ParseException;
 use Efabrica\PHPStanLatte\Temp\TempDirResolver;
@@ -15,14 +15,12 @@ use Latte\Engine;
 use Nette\Utils\FileSystem;
 use function array_filter;
 use function array_pop;
-use function class_exists;
 use function explode;
 use function file_exists;
 use function file_get_contents;
 use function file_put_contents;
 use function getcwd;
 use function implode;
-use function json_encode;
 use function md5;
 use function mkdir;
 use function pathinfo;
@@ -69,7 +67,7 @@ final class LatteToPhpCompiler
             PHP_VERSION_ID .
             $compiler->getCacheKey() .
             $postprocessor->getCacheKey() .
-            (class_exists(InstalledVersions::class) ? json_encode(InstalledVersions::getAllRawData()) : '')
+            ComposerPackagesCacheKey::get()
         );
         $this->compiler = $compiler;
         $this->postprocessor = $postprocessor;
