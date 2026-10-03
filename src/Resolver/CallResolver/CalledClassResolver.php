@@ -9,6 +9,7 @@ use PhpParser\Node;
 use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\StaticCall;
 use PhpParser\Node\Expr\Variable;
+use PhpParser\Node\Name;
 use PHPStan\Analyser\Scope;
 use function is_string;
 
@@ -29,7 +30,7 @@ final class CalledClassResolver
         }
 
         if ($node instanceof StaticCall) {
-            if ($node->class instanceof Variable) {
+            if (!$node->class instanceof Name) {
                 return null;
             }
             $calledClassName = $this->nameResolver->resolve($node->class);

@@ -24,24 +24,22 @@ use PHPStan\Reflection\ReflectionProvider;
 use PHPStan\Rules\RuleErrorBuilder;
 use RuntimeException;
 use Throwable;
-use function array_diff;
-use function array_merge;
-use function array_unique;
 use function basename;
 use function class_exists;
 use function count;
 use function file_exists;
 use function get_class;
+use function getenv;
 use function is_array;
 use function is_dir;
 use function is_file;
 use function is_string;
 use function json_encode;
 use function md5;
+use function microtime;
 use function sha1;
 use function sprintf;
 use const JSON_OBJECT_AS_ARRAY;
-use const JSON_PRETTY_PRINT;
 use const PHP_VERSION_ID;
 
 final class LatteContextAnalyser
@@ -61,6 +59,16 @@ final class LatteContextAnalyser
     private LatteContextCollectorRegistry $collectorRegistry;
 
     private string $tmpDir;
+
+    private string $installedVersionsCacheKey;
+
+    /** @var array<string, string> */
+    private array $fileHashes = [];
+
+    /** @var array<string, LatteContextData> */
+    private array $failedFileResults = [];
+
+    private ?LatteContextProfiler $profiler;
 
     /**
      * @param AbstractLatteContextCollector[] $collectors
@@ -85,6 +93,13 @@ final class LatteContextAnalyser
         $this->typeStringResolver = $typeStringResolver;
         $this->collectorRegistry = new LatteContextCollectorRegistry($collectors);
         $this->tmpDir = $tempDirResolver->resolveCollectorDir();
+        $this->installedVersionsCacheKey = class_exists(InstalledVersions::class)
+            ? (string)json_encode(InstalledVersions::getAllRawData())
+            : '';
+        $profileSetting = getenv('PHPSTAN_LATTE_PROFILE');
+        $this->profiler = $profileSetting !== false && $profileSetting !== '' && $profileSetting !== '0'
+            ? new LatteContextProfiler()
+            : null;
         if (file_exists($this->tmpDir) && $debugMode) {
             FileSystem::delete($this->tmpDir);
         }
@@ -94,6 +109,25 @@ final class LatteContextAnalyser
      * @param string[] $files
      */
     public function analyseFiles(array $files): LatteContextData
+    {
+        if ($this->profiler === null) {
+            return $this->analyseFilesInternal($files);
+        }
+
+        $this->profiler->enter();
+        $startedAt = microtime(true);
+        try {
+            return $this->analyseFilesInternal($files);
+        } finally {
+            $this->profiler->recordDuration('analyseFiles', $startedAt);
+            $this->profiler->leave();
+        }
+    }
+
+    /**
+     * @param string[] $files
+     */
+    private function analyseFilesInternal(array $files): LatteContextData
     {
         $errors = [];
         $collectedData = [];
@@ -108,23 +142,49 @@ final class LatteContextAnalyser
             }
             $relatedFiles = [];
             foreach ($files as $file) {
-                $fileResult = $this->loadLatteContextDataFromCache($file);
-                if (!$fileResult) {
-                    $fileResult = $this->analyseFile($file);
-                    if ($fileResult->getErrors() === []) {
-                        $this->saveLatteContextDataToCache($file, $fileResult);
-                    } else {
-                        $errors = array_merge($errors, $fileResult->getErrors());
+                $fileResult = $this->failedFileResults[$file] ?? $this->loadLatteContextDataFromCache($file);
+                if ($fileResult === null) {
+                    if ($this->profiler !== null) {
+                        $this->profiler->increment('diskCacheMiss');
                     }
-                } else {
+                    $analysisStartedAt = $this->profiler === null ? 0.0 : microtime(true);
+                    $fileResult = $this->analyseFile($file);
+                    if ($this->profiler !== null) {
+                        $this->profiler->recordDuration('analyseFile', $analysisStartedAt);
+                    }
+                    if ($fileResult->getErrors() === []) {
+                        $cacheWriteStartedAt = $this->profiler === null ? 0.0 : microtime(true);
+                        $this->saveLatteContextDataToCache($file, $fileResult);
+                        if ($this->profiler !== null) {
+                            $this->profiler->recordDuration('cacheWrite', $cacheWriteStartedAt);
+                        }
+                    } else {
+                        $this->failedFileResults[$file] = $fileResult;
+                    }
+                } elseif ($fileResult->getErrors() === [] && $this->profiler !== null) {
+                    $this->profiler->increment('diskCacheHit');
+                }
+                foreach ($fileResult->getErrors() as $error) {
+                    $errors[] = $error;
                 }
                 if ($fileResult->getAllCollectedData() !== []) {
-                    $collectedData = array_merge($collectedData, $fileResult->getAllCollectedData());
-                    $processedFiles = array_unique(array_merge($processedFiles, $fileResult->getProcessedFiles()));
-                    $relatedFiles = array_unique(array_merge($relatedFiles, $fileResult->getRelatedFiles()));
+                    foreach ($fileResult->getAllCollectedData() as $collectedItem) {
+                        $collectedData[] = $collectedItem;
+                    }
+                    foreach ($fileResult->getProcessedFiles() as $processedFile) {
+                        $processedFiles[$processedFile] = true;
+                    }
+                    foreach ($fileResult->getRelatedFiles() as $relatedFile) {
+                        $relatedFiles[$relatedFile] = true;
+                    }
                 }
             }
-            $files = array_diff($relatedFiles, $processedFiles);
+            $files = [];
+            foreach ($relatedFiles as $relatedFile => $_) {
+                if (!isset($processedFiles[$relatedFile])) {
+                    $files[] = $relatedFile;
+                }
+            }
         } while (count($files) > 0);
 
         return new LatteContextData($collectedData, $errors);
@@ -157,7 +217,9 @@ final class LatteContextAnalyser
                         if ($collectedData === null || $collectedData === []) {
                             continue;
                         }
-                        $fileCollectedData = array_merge($fileCollectedData, $collectedData);
+                        foreach ($collectedData as $collectedItem) {
+                            $fileCollectedData[] = $collectedItem;
+                        }
                     }
                 };
                 $scope = $this->scopeFactory->create(ScopeContext::create($file));
@@ -215,11 +277,7 @@ final class LatteContextAnalyser
 
     private function cacheFilename(string $file): string
     {
-        $cacheKey = md5(
-            $file .
-            PHP_VERSION_ID .
-            (class_exists(InstalledVersions::class) ? json_encode(InstalledVersions::getAllRawData()) : '')
-        );
+        $cacheKey = md5($file . PHP_VERSION_ID . $this->installedVersionsCacheKey);
         return $this->tmpDir . basename($file) . '.' . $cacheKey . '.json';
     }
 
@@ -243,38 +301,36 @@ final class LatteContextAnalyser
 
         $cacheData = [
             'file' => $file,
-            'fileHash' => sha1(Filesystem::read($file)),
+            'fileHash' => $this->getFileHash($file),
             'data' => $data,
         ];
         foreach ($fileResult->getRelatedFiles() as $relatedFile) {
             $cacheData['dependencies'][] = [
                 'file' => $relatedFile,
-                'fileHash' => sha1(Filesystem::read($relatedFile)),
+                'fileHash' => $this->getFileHash($relatedFile),
             ];
         }
-        Filesystem::write(
-            $cacheFile,
-            Json::encode($cacheData, JSON_PRETTY_PRINT)
-        );
+        Filesystem::write($cacheFile, Json::encode($cacheData));
     }
 
     private function loadLatteContextDataFromCache(string $file): ?LatteContextData
     {
+        $analysedFile = $file;
         $cacheFile = $this->cacheFilename($file);
         if (!is_file($cacheFile)) {
-            return null;
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'not-found');
         }
 
         try {
             $cacheData = Json::decode(Filesystem::read($cacheFile), JSON_OBJECT_AS_ARRAY);
         } catch (Exception $e) {
             FileSystem::delete($cacheFile);
-            return null;
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-json');
         }
 
         if (!is_array($cacheData) || !isset($cacheData['file'], $cacheData['fileHash'], $cacheData['data'])) {
             FileSystem::delete($cacheFile);
-            return null;
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-structure');
         }
 
         $file = $cacheData['file'];
@@ -282,30 +338,30 @@ final class LatteContextAnalyser
 
         if (!is_string($file) || !is_string($fileHash)) {
             FileSystem::delete($cacheFile);
-            return null;
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-file-hash');
         }
 
         // Check if the file has changed since the cache was created
-        if (sha1(Filesystem::read($file)) !== $fileHash) {
-            return null;
+        if ($this->getFileHash($file) !== $fileHash) {
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'file-hash-changed');
         }
 
         if (isset($cacheData['dependencies']) && is_array($cacheData['dependencies'])) {
             foreach ($cacheData['dependencies'] as $dependency) {
                 if (!is_array($dependency) || !isset($dependency['file'], $dependency['fileHash'])) {
-                    return null;
+                    return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-dependency');
                 }
                 $dependencyFile = $dependency['file'];
                 $dependencyFileHash = $dependency['fileHash'];
                 if (!is_string($dependencyFile) || !is_string($dependencyFileHash)) {
-                    return null;
+                    return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-dependency-hash');
                 }
                 if (!is_file($dependencyFile)) {
-                    return null;
+                    return $this->recordCacheMiss($analysedFile, $cacheFile, 'dependency-not-found');
                 }
                 // Check if the dependency file has changed since the cache was created
-                if (sha1(Filesystem::read($dependencyFile)) !== $dependencyFileHash) {
-                    return null;
+                if ($this->getFileHash($dependencyFile) !== $dependencyFileHash) {
+                    return $this->recordCacheMiss($analysedFile, $cacheFile, 'dependency-hash-changed');
                 }
             }
         }
@@ -313,14 +369,32 @@ final class LatteContextAnalyser
         $data = $cacheData['data'];
         if (!is_array($data)) {
             FileSystem::delete($cacheFile);
-            return null;
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-data');
         }
 
         try {
             return LatteContextData::fromJson($data, $this->typeStringResolver);
         } catch (Exception $e) {
             FileSystem::delete($cacheFile);
-            return null;
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-collected-data');
         }
+    }
+
+    private function recordCacheMiss(string $file, string $cacheFile, string $reason): null
+    {
+        if ($this->profiler !== null) {
+            $this->profiler->recordCacheMiss($file, $cacheFile, $reason);
+        }
+
+        return null;
+    }
+
+    private function getFileHash(string $file): string
+    {
+        if (!isset($this->fileHashes[$file])) {
+            $this->fileHashes[$file] = sha1(FileSystem::read($file));
+        }
+
+        return $this->fileHashes[$file];
     }
 }

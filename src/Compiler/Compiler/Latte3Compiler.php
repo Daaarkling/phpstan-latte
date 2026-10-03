@@ -10,6 +10,8 @@ use Latte\Essential\RawPhpExtension;
 use Latte\Extension;
 use Nette\Bridges\ApplicationLatte\UIExtension;
 use Nette\Bridges\FormsLatte\FormsExtension;
+use RuntimeException;
+
 use function array_keys;
 use function array_map;
 use function array_merge;
@@ -19,10 +21,18 @@ use function implode;
 use function is_array;
 use function is_object;
 use function md5;
+use function method_exists;
 use function preg_replace;
+use function str_contains;
+use function str_replace;
+use function str_starts_with;
+use function strlen;
+use function substr;
 
 final class Latte3Compiler extends AbstractCompiler
 {
+    private const CACHE_KEY_VERSION = 2;
+
     /**
      * @param array<string, string|array{string, string}> $filters
      * @param Extension[] $extensions
@@ -45,6 +55,8 @@ final class Latte3Compiler extends AbstractCompiler
             $extensions = [];
         }
         return md5(
+            self::CACHE_KEY_VERSION .
+            Engine::Version .
             implode('', array_keys($this->getFilters())) .
             implode('', array_keys($this->getFunctions())) .
             implode('', array_map(function ($extension) {
@@ -86,14 +98,47 @@ final class Latte3Compiler extends AbstractCompiler
     {
         $templateNode = $this->engine->parse($templateContent);
         $this->engine->applyPasses($templateNode);
-        $className = $this->generateClassName();
         $templateGenerator = new TemplateGenerator();
-        $phpContent = $templateGenerator->generate(
-            $templateNode,
-            $className,
-            $this->generateClassComment($className, $context),
-            $this->strictMode
-        );
+        if (method_exists($templateGenerator, 'generate')) {
+            $className = $this->generateClassName();
+            $phpContent = $templateGenerator->generate(
+                $templateNode,
+                $className,
+                $this->generateClassComment($className, $context),
+                $this->strictMode
+            );
+        } else {
+            $templateName = $this->generateClassName();
+            $engineClassName = $this->engine->getTemplateClass($templateName);
+            if (!str_starts_with($engineClassName, 'Template_')) {
+                throw new RuntimeException('Unexpected Latte template class name.');
+            }
+            $className = sprintf(
+                'PHPStanLatteTemplate_%s',
+                substr($engineClassName, strlen('Template_')),
+            );
+            $sourceComment = sprintf('/** source: %s */', $templateName);
+            $phpContent = $this->engine->generate($templateNode, $templateName);
+            if (!str_contains($phpContent, $sourceComment) || !str_contains($phpContent, $engineClassName)) {
+                throw new RuntimeException('Unable to add Latte template context to generated PHP.');
+            }
+            $phpContent = str_replace($engineClassName, $className, $phpContent);
+            $phpContent = str_replace(
+                $sourceComment,
+                sprintf('/**%s */', $this->generateClassComment($className, $context)),
+                $phpContent,
+            );
+            $phpContent = preg_replace(
+                '/\A<\?php(?: declare\(strict_types=1\);)?/',
+                '<?php' . ($this->strictMode ? ' declare(strict_types=1);' : ''),
+                $phpContent,
+                1,
+                $replacementCount,
+            );
+            if ($phpContent === null || $replacementCount !== 1) {
+                throw new RuntimeException('Unable to configure strict types in generated Latte PHP.');
+            }
+        }
         $phpContent = $this->fixLines($phpContent);
         $phpContent = $this->addTypes($phpContent, $className, $actualClass);
         return $phpContent;
@@ -112,11 +157,20 @@ final class Latte3Compiler extends AbstractCompiler
     private function fixLines(string $phpContent): string
     {
         // fix lines after $component->render()
-        $pattern = '/\$ʟ_tmp = \$this->global->uiControl->getComponent(.*?)\$ʟ_tmp->render\((.*?)\) (?<line>(.*?)\/\*(.*?)line (?<number>\d+)(.*?)\*\/);/s';
-        $phpContent = preg_replace($pattern, '${3}' . "\n\t\t" . '$ʟ_tmp = $this->global->uiControl->getComponent${1}$ʟ_tmp->render(${2});', $phpContent) ?: '';
+        $pattern = '/\$ʟ_tmp = \$this->global->uiControl->getComponent(.*?)'
+            . '\$ʟ_tmp->render\((.*?)\) (?<line>(.*?)\/\*(.*?) (?:line|pos) '
+            . '(?<number>\d+)(?::\d+)?(.*?)\*\/);/s';
+        $phpContent = preg_replace(
+            $pattern,
+            '${3}' . "\n\t\t"
+                . '$ʟ_tmp = $this->global->uiControl->getComponent${1}'
+                . '$ʟ_tmp->render(${2});',
+            $phpContent,
+        ) ?: '';
 
         // fix lines at the end of lines
-        $pattern = '/(.*?) (?<line>\/\*(.*?)line (?<number>\d+)(.*?)\*\/)/';
+        $pattern = '/(.*?) (?<line>\/\*(.*?) (?:line|pos) '
+            . '(?<number>\d+)(?::\d+)?(.*?)\*\/)/';
         return preg_replace($pattern, '${2}${1}', $phpContent) ?: '';
     }
 }

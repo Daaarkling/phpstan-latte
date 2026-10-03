@@ -18,7 +18,6 @@ use PHPStan\Reflection\ClassReflection;
 use PHPStan\Reflection\ReflectionProvider;
 use function array_filter;
 use function array_unique;
-use function class_exists;
 use function file_exists;
 use function in_array;
 use function realpath;
@@ -96,7 +95,10 @@ final class RelatedFilesCollector extends AbstractLatteContextCollector
                 $newClassNames = [$this->nameResolver->resolve($node->class)];
             }
             foreach ($newClassNames as $newClassName) {
-                if ($newClassName !== null && !in_array($newClassName, ['this', 'self', 'static', 'parent'], true) && class_exists($newClassName)) {
+                if ($newClassName !== null
+                    && !in_array($newClassName, ['this', 'self', 'static', 'parent'], true)
+                    && $this->reflectionProvider->hasClass($newClassName)
+                ) {
                     $classReflection = $this->reflectionProvider->getClass($newClassName);
                     if (!$classReflection->isInterface() && !$classReflection->isTrait()) {
                         $filename = $this->getFilename($classReflection);
@@ -108,7 +110,10 @@ final class RelatedFilesCollector extends AbstractLatteContextCollector
             }
         } elseif ($node instanceof CallLike) {
             $calledClassName = $this->calledClassResolver->resolve($node, $scope);
-            if ($calledClassName !== null && !in_array($calledClassName, ['this', 'self', 'static', 'parent'], true)) {
+            if ($calledClassName !== null
+                && !in_array($calledClassName, ['this', 'self', 'static', 'parent'], true)
+                && $this->reflectionProvider->hasClass($calledClassName)
+            ) {
                 $classReflection = $this->reflectionProvider->getClass($calledClassName);
                 if (!$classReflection->isInterface() && !$classReflection->isTrait()) {
                     $filename = $this->getFilename($classReflection);

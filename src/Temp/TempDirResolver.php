@@ -23,7 +23,7 @@ use const DIRECTORY_SEPARATOR;
 final class TempDirResolver
 {
     private const MAX_AGE = 7 * 24 * 60 * 60; // one week
-    private const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
+    private const MAX_SIZE = 512 * 1024 * 1024; // 512 MiB
 
     private string $tmpDir;
 

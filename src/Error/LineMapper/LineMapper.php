@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Efabrica\PHPStanLatte\Error\LineMapper;
 
 use InvalidArgumentException;
+
 use function explode;
 use function file_exists;
 use function file_get_contents;
@@ -28,7 +29,9 @@ final class LineMapper
     public function getLineMap(string $compiledTemplatePath): LineMap
     {
         if (!file_exists($compiledTemplatePath)) {
-            throw new InvalidArgumentException('Compiled template file "' . $compiledTemplatePath . '" doesn\'t exist.');
+            throw new InvalidArgumentException(
+                'Compiled template file "' . $compiledTemplatePath . '" doesn\'t exist.',
+            );
         }
         if (isset($this->lineMaps[$compiledTemplatePath])) {
             return $this->lineMaps[$compiledTemplatePath];
@@ -53,7 +56,8 @@ final class LineMapper
 
         $lineMap = new LineMap();
         foreach ($phpLineContents as $i => $phpLineContent) {
-            $pattern = '/\*(.*?)line (?<number>\d+)(.*?)\*/';
+            $pattern = '/\*(.*?) (?:line|pos) (?<number>\d+)'
+                . '(?::\d+)?(.*?)\*/';
             preg_match($pattern, $phpLineContent, $matches);
 
             $latteLine = isset($matches['number']) ? (int)$matches['number'] : null;
