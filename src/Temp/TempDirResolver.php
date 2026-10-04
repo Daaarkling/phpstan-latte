@@ -5,13 +5,16 @@ declare(strict_types=1);
 namespace Efabrica\PHPStanLatte\Temp;
 
 use FilesystemIterator;
+use Nette\IOException;
 use Nette\Utils\FileSystem;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use RuntimeException;
 use SplFileInfo;
+use function file_exists;
 use function filemtime;
 use function is_dir;
+use function is_link;
 use function is_writable;
 use function realpath;
 use function rtrim;
@@ -28,11 +31,11 @@ final class TempDirResolver
 
     private string $tmpDir;
 
-    public function __construct(?string $tmpDir)
+    public function __construct(?string $tmpDir, bool $prune = true)
     {
         $tmpDir = $tmpDir ? rtrim($tmpDir, DIRECTORY_SEPARATOR) : sys_get_temp_dir() . '/phpstan-latte';
 
-        if (is_dir($tmpDir) &&
+        if ($prune && is_dir($tmpDir) &&
            (time() - (int)filemtime($tmpDir) > self::MAX_AGE ||
            $this->getDirTotalSize($tmpDir) > self::MAX_SIZE)
         ) {
@@ -75,7 +78,14 @@ final class TempDirResolver
         );
         /** @var SplFileInfo $file */
         foreach ($ri as $file) {
-            Filesystem::delete($file->getPathname());
+            $path = $file->getPathname();
+            try {
+                FileSystem::delete($path);
+            } catch (IOException $e) {
+                if (file_exists($path) || is_link($path)) {
+                    throw $e;
+                }
+            }
         }
     }
 
@@ -84,7 +94,14 @@ final class TempDirResolver
         $size = 0;
         /** @var SplFileInfo $file */
         foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($tmpDir, FilesystemIterator::SKIP_DOTS)) as $file) {
-            $size += $file->getSize();
+            try {
+                $size += $file->getSize();
+            } catch (RuntimeException $e) {
+                $path = $file->getPathname();
+                if (file_exists($path) || is_link($path)) {
+                    throw $e;
+                }
+            }
         }
         return $size;
     }
