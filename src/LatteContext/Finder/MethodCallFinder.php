@@ -61,6 +61,9 @@ final class MethodCallFinder
     {
         $cacheKey = $className . '::' . $methodName;
         if (!isset($this->declaringClassCache[$cacheKey])) {
+            if (!$this->reflectionProvider->hasClass($className)) {
+                return null;
+            }
             $classReflection = $this->reflectionProvider->getClass($className);
             if (!$classReflection->hasNativeMethod($methodName)) {
                 return null;
