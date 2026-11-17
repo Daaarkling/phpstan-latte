@@ -37,6 +37,7 @@ use function md5;
 use function microtime;
 use function sha1;
 use function sprintf;
+use function strpos;
 use const JSON_OBJECT_AS_ARRAY;
 use const PHP_VERSION_ID;
 
@@ -280,7 +281,7 @@ final class LatteContextAnalyser
     private function saveLatteContextDataToCache(string $file, LatteContextData $fileResult): void
     {
         if (!is_dir($this->tmpDir)) {
-            Filesystem::createDir($this->tmpDir, 0777);
+            FileSystem::createDir($this->tmpDir, 0777);
         }
 
         $cacheFile = $this->cacheFilename($file);
@@ -291,6 +292,17 @@ final class LatteContextAnalyser
             // Cannot serialize data, skip caching
             if (is_file($cacheFile)) {
                 FileSystem::delete($cacheFile);
+            }
+            return;
+        }
+
+        // Reconstructing closure types changes diagnostics when they are later merged.
+        if ($this->containsSerializedClosureType($data)) {
+            if (is_file($cacheFile)) {
+                FileSystem::delete($cacheFile);
+            }
+            if ($this->profiler !== null) {
+                $this->profiler->increment('diskCacheSkippedClosureType');
             }
             return;
         }
@@ -306,7 +318,7 @@ final class LatteContextAnalyser
                 'fileHash' => $this->getFileHash($relatedFile),
             ];
         }
-        Filesystem::write($cacheFile, Json::encode($cacheData));
+        FileSystem::write($cacheFile, Json::encode($cacheData));
     }
 
     private function loadLatteContextDataFromCache(string $file): ?LatteContextData
@@ -318,7 +330,7 @@ final class LatteContextAnalyser
         }
 
         try {
-            $cacheData = Json::decode(Filesystem::read($cacheFile), JSON_OBJECT_AS_ARRAY);
+            $cacheData = Json::decode(FileSystem::read($cacheFile), JSON_OBJECT_AS_ARRAY);
         } catch (Exception $e) {
             FileSystem::delete($cacheFile);
             return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-json');
@@ -368,12 +380,39 @@ final class LatteContextAnalyser
             return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-data');
         }
 
+        if ($this->containsSerializedClosureType($data)) {
+            FileSystem::delete($cacheFile);
+            return $this->recordCacheMiss($analysedFile, $cacheFile, 'closure-type-not-cacheable');
+        }
+
         try {
-            return LatteContextData::fromJson($data, $this->typeStringResolver, true);
+            $latteContextData = LatteContextData::fromJson($data, $this->typeStringResolver, true);
+            if ($latteContextData->jsonSerialize() !== $data) {
+                FileSystem::delete($cacheFile);
+                return $this->recordCacheMiss($analysedFile, $cacheFile, 'non-round-trip-data');
+            }
+            return $latteContextData;
         } catch (Exception $e) {
             FileSystem::delete($cacheFile);
             return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-collected-data');
         }
+    }
+
+    /**
+     * @param array<array-key, mixed> $data
+     */
+    private function containsSerializedClosureType(array $data): bool
+    {
+        foreach ($data as $value) {
+            if (is_array($value) && $this->containsSerializedClosureType($value)) {
+                return true;
+            }
+            if (is_string($value) && strpos($value, 'Closure(') !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function recordCacheMiss(string $file, string $cacheFile, string $reason): null
