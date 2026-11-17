@@ -14,6 +14,7 @@ use PHPStan\Rules\IdentifierRuleError;
 use PHPStan\Rules\RuleErrorBuilder;
 use ReturnTypeWillChange;
 use function array_unique;
+use function array_values;
 use function class_exists;
 use function get_class;
 use function is_array;
@@ -24,20 +25,34 @@ final class LatteContextData implements JsonSerializable
     private array $errors;
 
     /** @var array<CollectedLatteContextObject> */
-    private array $collectedData = [];
+    private array $collectedData;
 
     /** @var array<class-string, CollectedLatteContextObject[]> */
     private array $collectedDataByType = [];
+
+    private bool $collectedDataByTypeIndexComplete;
 
     /**
      * @param array<CollectedLatteContextObject> $collectedData
      * @param list<IdentifierRuleError> $errors
      */
-    public function __construct(array $collectedData, array $errors)
+    public function __construct(array $collectedData, array $errors, bool $lazyCollectedDataIndex = false)
     {
-        foreach ($collectedData as $collectedItem) {
-            $this->collectedData[] = $collectedItem;
-            $this->collectedDataByType[get_class($collectedItem)][] = $collectedItem;
+        $this->collectedData = $collectedData;
+        $this->collectedDataByTypeIndexComplete = !$lazyCollectedDataIndex;
+        $isList = true;
+        $index = 0;
+        foreach ($collectedData as $key => $collectedItem) {
+            if (!$lazyCollectedDataIndex) {
+                $this->collectedDataByType[get_class($collectedItem)][] = $collectedItem;
+            }
+            if ($key !== $index) {
+                $isList = false;
+            }
+            $index++;
+        }
+        if (!$isList) {
+            $this->collectedData = array_values($collectedData);
         }
         $this->errors = $errors;
     }
@@ -81,6 +96,16 @@ final class LatteContextData implements JsonSerializable
      */
     public function getCollectedData(string $type): array
     {
+        if (!$this->collectedDataByTypeIndexComplete && !isset($this->collectedDataByType[$type])) {
+            $collectedData = [];
+            foreach ($this->collectedData as $collectedItem) {
+                if (get_class($collectedItem) === $type) {
+                    $collectedData[] = $collectedItem;
+                }
+            }
+            $this->collectedDataByType[$type] = $collectedData;
+        }
+
         /** @var T[] */
         return $this->collectedDataByType[$type] ?? [];
     }
@@ -132,8 +157,11 @@ final class LatteContextData implements JsonSerializable
     /**
      * @param array{items: array{class: class-string<CollectedLatteContextObject>, data: mixed}[]} $data
      */
-    public static function fromJson(array $data, TypeStringResolver $typeStringResolver): self
-    {
+    public static function fromJson(
+        array $data,
+        TypeStringResolver $typeStringResolver,
+        bool $lazyCollectedDataIndex = false,
+    ): self {
         $collectedData = [];
         foreach ($data['items'] as $item) {
             $class = $item['class'];
@@ -142,6 +170,6 @@ final class LatteContextData implements JsonSerializable
             }
             $collectedData[] = $class::fromJson($item['data'], $typeStringResolver);
         }
-        return new self($collectedData, []);
+        return new self($collectedData, [], $lazyCollectedDataIndex);
     }
 }

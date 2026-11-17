@@ -237,7 +237,7 @@ final class LatteContextAnalyser
                 ->file($file)
                 ->build();
         }
-        return new LatteContextData($fileCollectedData, $fileErrors);
+        return new LatteContextData($fileCollectedData, $fileErrors, true);
     }
 
     /**
@@ -369,7 +369,7 @@ final class LatteContextAnalyser
         }
 
         try {
-            return LatteContextData::fromJson($data, $this->typeStringResolver);
+            return LatteContextData::fromJson($data, $this->typeStringResolver, true);
         } catch (Exception $e) {
             FileSystem::delete($cacheFile);
             return $this->recordCacheMiss($analysedFile, $cacheFile, 'invalid-collected-data');
